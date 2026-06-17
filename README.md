@@ -1,4 +1,4 @@
-Updating this mod's libraries everytime the official [FFmpeg](ffmpeg.org) is updated.
+Updating this mod's libraries everytime the official [FFmpeg](https;//ffmpeg.org) is updated.
 
 # ffmpeg-api
 A mod that lets developers easily interact with ffmpeg to record raw videos, and mix video and audio files.
