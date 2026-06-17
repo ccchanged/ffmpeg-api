@@ -37,10 +37,10 @@ jobs:
       - name: Own The Libs (Checkout)
         uses: actions/checkout@v4
         with:
-          repository: EclipseMenu/ffmpeg-libs
-          ref: ${{ matrix.config.name }}
-          token: ${{ secrets.FFMPEG_LIBS_TOKEN }}
-          path: ffmpeg-libs
+          repository: ccchanged/compilation-center
+          ref: ffmpeg-api
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: lib
 
       - name: Own The Libs (Extract)
         run: 7z x ffmpeg-libs/lib/lib.7z -olib
