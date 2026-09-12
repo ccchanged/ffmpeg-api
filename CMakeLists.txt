@@ -104,6 +104,10 @@ else ()
 endif()
 target_link_libraries(${PROJECT_NAME} ${STATIC_LIBS})
 
+if (ANDROID)
+    target_link_options(${PROJECT_NAME} PRIVATE "-Wl,-Bsymbolic")
+endif()
+
 if (PROJECT_IS_TOP_LEVEL)
     target_compile_definitions(${PROJECT_NAME} PRIVATE FFMPEG_API_EXPORTING)
 endif()
