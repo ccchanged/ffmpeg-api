@@ -58,7 +58,6 @@ elseif (ANDROID)
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libavfilter.a
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libswresample.a
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libswscale.a
-            ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libpostproc.a
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libaom.a
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libvpx.a
             ${CMAKE_SOURCE_DIR}/lib/arm64-v8a/libx264.a
@@ -77,7 +76,6 @@ elseif (ANDROID)
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libavfilter.a
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libswresample.a
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libswscale.a
-            ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libpostproc.a
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libaom.a
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libvpx.a
             ${CMAKE_SOURCE_DIR}/lib/armeabi-v7a/libx264.a
