@@ -12,12 +12,6 @@ jobs:
       fail-fast: false
       matrix:
         config:
-        - name: Windows
-          os: windows-latest
-
-        - name: macOS
-          os: macos-latest
-          
         - name: Android32
           os: ubuntu-latest
           target: Android32
@@ -37,7 +31,7 @@ jobs:
       - name: Own The Libs (Checkout)
         uses: actions/checkout@v4
         with:
-          repository: EclipseMenu/ffmpeg-libs
+          repository: ccchanged/ffmpeg-libs
           ref: ${{ matrix.config.name }}
           token: ${{ secrets.FFMPEG_LIBS_TOKEN }}
           path: ffmpeg-libs
