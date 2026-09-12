@@ -11,7 +11,7 @@
     "id": "patchteam.ffmpeg-api",
     "name": "FFmpeg API",
     "version": "v3.0.0",
-    "developers": ["PatchTeam", "Qwix"],
+    "developers": ["PatchTeam", "ccchanged"],
     "description": "Interaction with FFmpeg made easy",
     "tags": ["utility", "offline", "developer", "api"],
     "links": {
