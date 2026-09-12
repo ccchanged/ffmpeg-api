@@ -56,8 +56,10 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
     if (!m_codecContext)
         return geode::Err("Could not allocate video codec context.");
 
-    if(settings.m_hardwareAccelerationType != HardwareAccelerationType::NONE && (ret = av_hwdevice_ctx_create(&m_hwDevice, (AVHWDeviceType)settings.m_hardwareAccelerationType, NULL, NULL, 0)); ret < 0)
-        return geode::Err("Could not create hardware device context: " + utils::getErrorString(ret));
+    if(settings.m_hardwareAccelerationType != HardwareAccelerationType::NONE) {
+        if (ret = av_hwdevice_ctx_create(&m_hwDevice, (AVHWDeviceType)settings.m_hardwareAccelerationType, NULL, NULL, 0); ret < 0)
+            return geode::Err("Could not create hardware device context: " + utils::getErrorString(ret));
+    }
 
     m_codecContext->hw_device_ctx = m_hwDevice ? av_buffer_ref(m_hwDevice) : nullptr;
     m_codecContext->codec_id = m_codec->id;
@@ -67,9 +69,6 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
     m_codecContext->time_base = AVRational{1, settings.m_fps};
     m_codecContext->pix_fmt = AV_PIX_FMT_NONE;
     m_videoStream->time_base = m_codecContext->time_base;
-
-    if(!m_codecContext->pix_fmt)
-        return geode::Err("Codec does not have any supported pixel formats.");
 
     if (const AVPixelFormat *pix_fmt = m_codec->pix_fmts) {
         while (*pix_fmt != AV_PIX_FMT_NONE) {
@@ -83,6 +82,9 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
                 m_codecContext->pix_fmt = *pix_fmt;
             ++pix_fmt;
         }
+    } else {
+        // codec doesnt advertise any supproted pixel formats - avoid deferencing m_codec->pix_fmts[0] below which be a null pointer read
+        return geode::Err("Codec does not have any supported pixel formats.");
     }
     if(m_codecContext->pix_fmt == AV_PIX_FMT_NONE) {
         geode::log::info("Codec {} does not support pixel format, defaulting to codec's format", settings.m_codec);
@@ -158,21 +160,20 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
             return geode::Err("Could not create output for filter graph: " + utils::getErrorString(ret));
         }
 
+        AVFilterContext* lastCtx = m_buffersrcCtx;
+
         if(!settings.m_colorspaceFilters.empty()) {
             if(ret = avfilter_graph_create_filter(&m_colorspaceCtx, colorspace, "colorspace", settings.m_colorspaceFilters.c_str(), nullptr, m_filterGraph); ret < 0) {
                 avfilter_graph_free(&m_filterGraph);
                 return geode::Err("Could not create colorspace for filter graph: " + utils::getErrorString(ret));
             }
 
-            if(ret = avfilter_link(m_buffersrcCtx, 0, m_colorspaceCtx, 0); ret < 0) {
+            if(ret = avfilter_link(lastCtx, 0, m_colorspaceCtx, 0); ret < 0) {
                 avfilter_graph_free(&m_filterGraph);
                 return geode::Err("Could not link filters: " + utils::getErrorString(ret));
             }
 
-            if(ret = avfilter_link(m_colorspaceCtx, 0, m_buffersinkCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
+            lastCtx = m_colorspaceCtx;
         }
 
         if(settings.m_doVerticalFlip) {
@@ -181,15 +182,17 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
                 return geode::Err("Could not create vflip for filter graph: " + utils::getErrorString(ret));
             }
 
-            if(ret = avfilter_link(m_buffersrcCtx, 0, m_vflipCtx, 0); ret < 0) {
+            if(ret = avfilter_link(lastCtx, 0, m_vflipCtx, 0); ret < 0) {
                 avfilter_graph_free(&m_filterGraph);
                 return geode::Err("Could not link filters: " + utils::getErrorString(ret));
             }
 
-            if(ret = avfilter_link(m_vflipCtx, 0, m_buffersinkCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
+            lastCtx = m_vflipCtx;
+        }
+
+        if(ret = avfilter_link(lastCtx, 0, m_buffersinkCtx, 0); ret < 0) {
+            avfilter_graph_free(&m_filterGraph);
+            return geode::Err("Could not link filters: " + utils::getErrorString(ret));
         }
 
         if (ret = avfilter_graph_config(m_filterGraph, nullptr); ret < 0) {
