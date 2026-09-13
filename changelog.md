@@ -1,6 +1,6 @@
 # 3.1.0
 - Updated FFmpeg to 8.1.2
-- Fixed memory leak
+- Tiny code optimizations
 
 # 2.0.0
 - Updated to Geode v5
