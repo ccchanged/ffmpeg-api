@@ -57,6 +57,25 @@ private:
     std::unique_ptr<Impl> m_impl = nullptr;
 
 public:
+    // Impl only owns raw FFmpeg handles, so if the owner deletes this
+    // Recorder without ever calling stop() (forgotten call, early return,
+    // an exception on the caller's side), everything it holds would
+    // otherwise leak for good. stop() is idempotent, so it's safe to run
+    // here even if the caller already stopped it themselves.
+    ~Recorder() { stop(); }
+
+    // A user-declared destructor stops the compiler from implicitly
+    // generating move operations, which this class (part of the exported
+    // API) previously got for free from its unique_ptr member -- restore
+    // them explicitly so existing move-construction/assignment still
+    // compiles. Copying stays disabled, same as before (unique_ptr already
+    // makes the implicit copy operations deleted).
+    Recorder() = default;
+    Recorder(Recorder&&) = default;
+    Recorder& operator=(Recorder&&) = default;
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+
     /**
      * @brief Initializes the Recorder with the specified rendering settings.
      *
@@ -69,6 +88,13 @@ public:
      * @return true if initialization is successful, false otherwise.
      */
     geode::Result<> init(const RenderSettings& settings) {
+        // Impl has no destructor of its own -- if we still have one from a
+        // previous session, release its FFmpeg resources before replacing
+        // it, otherwise everything it holds (format/codec context, frames,
+        // packet, filter graph, hw device, open file) leaks silently.
+        if (m_impl) {
+            m_impl->stop();
+        }
         m_impl = std::make_unique<Impl>();
         return m_impl->init(settings);
     }
@@ -79,7 +105,7 @@ public:
      * This function ensures that all buffered frames are written to the output file,
      * releases allocated resources, and properly closes the output file.
      */
-    void stop() const { m_impl->stop(); }
+    void stop() const { if (m_impl) m_impl->stop(); }
 
     /**
      * @brief Writes a single video frame to the output.
