@@ -395,9 +395,6 @@ BEGIN_FFMPEG_NAMESPACE_V
             return geode::Err("Could not allocate audio frame.");
         }
 
-        audioFrame->format = AV_SAMPLE_FMT_FLTP;
-        audioFrame->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-
         audioPacket = av_packet_alloc();
         if (!audioPacket) {
             cleanup();
@@ -407,6 +404,13 @@ BEGIN_FFMPEG_NAMESPACE_V
         for (size_t i = 0; i < resampled.size(); i += frameSize * channels) {
             int samplesToEncode = std::min(frameSize, static_cast<int>((resampled.size() - i) / channels));
 
+            // Release the buffer this frame was holding from the previous
+            // iteration before asking for a new one -- av_frame_get_buffer()
+            // is documented to leak memory (and risk undefined behavior) if
+            // called on a frame that's already allocated.
+            av_frame_unref(audioFrame);
+            audioFrame->format = AV_SAMPLE_FMT_FLTP;
+            audioFrame->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
             audioFrame->nb_samples = samplesToEncode;
             audioFrame->pts = pts;
 
