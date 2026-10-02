@@ -1,5 +1,5 @@
 {
-    "geode": "5.4.1",
+    "geode": "5.10.1",
     "gd": {
         "android": "*"
     },
@@ -11,11 +11,10 @@
     "id": "eclipse.ffmpeg-api",
     "name": "FFmpeg API",
     "version": "v2.1.0",
-    "developers": ["Eclipse Team", "maxnu", "Prevter"],
+    "developers": ["Eclipse Team", "maxnu", "Prevter", "ccchanged"],
     "description": "Interaction with FFmpeg made easy",
     "tags": ["utility", "offline", "developer", "api"],
     "links": {
-        "source": "https://github.com/EclipseMenu/ffmpeg-api",
-        "community": "https://discord.gg/NnpwFRDMND"
+        "source": "https://github.com/ccchanged/ffmpeg-api"
     }
 }
