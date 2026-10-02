@@ -1,52 +1,267 @@
 #include "recorder.hpp"
 #include "utils.hpp"
 
+#include <Geode/loader/Log.hpp>
+
+#include <algorithm>
+#include <cstdio>
+
 extern "C" {
     #include <libavcodec/avcodec.h>
-    #include <libavformat/avformat.h>
-    #include <libavutil/imgutils.h>
-    #include <libswscale/swscale.h>
     #include <libavfilter/avfilter.h>
-    #include <libavfilter/buffersrc.h>
     #include <libavfilter/buffersink.h>
+    #include <libavfilter/buffersrc.h>
+    #include <libavformat/avformat.h>
+    #include <libavutil/hwcontext.h>
+    #include <libavutil/imgutils.h>
+    #include <libavutil/pixdesc.h>
+    #include <libswscale/swscale.h>
 }
 
 BEGIN_FFMPEG_NAMESPACE_V
 
+// PixelFormat mirrors AVPixelFormat numerically (FFmpeg only ever appends new formats).
+// Verify that at compile time against whatever FFmpeg headers this is built with.
+#define PIXFMT_CHECK(mine, av) \
+    static_assert(static_cast<int>(PixelFormat::mine) == static_cast<int>(AV_PIX_FMT_##av), \
+                  "PixelFormat::" #mine " no longer matches AVPixelFormat, regenerate pixel_format_check.inc and the enum");
+#include "pixel_format_check.inc"
+#undef PIXFMT_CHECK
+
+namespace {
+
+/// Pixel formats the encoder lists as supported (empty = the encoder lists none).
+std::vector<AVPixelFormat> getSupportedPixelFormats(const AVCodec* codec) {
+    std::vector<AVPixelFormat> formats;
+    const void* configs = nullptr;
+    int count = 0;
+    if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, &configs, &count) >= 0 && configs) {
+        auto const* list = static_cast<const AVPixelFormat*>(configs);
+        formats.assign(list, list + count);
+    }
+    return formats;
+}
+
+bool isHardwareFormat(AVPixelFormat format) {
+    auto const* desc = av_pix_fmt_desc_get(format);
+    return desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+}
+
+bool isRgbFormat(AVPixelFormat format) {
+    auto const* desc = av_pix_fmt_desc_get(format);
+    return desc && (desc->flags & AV_PIX_FMT_FLAG_RGB);
+}
+
+/// Validated conversion from the public enum to FFmpeg's.
+geode::Result<> toAVPixelFormat(PixelFormat format, AVPixelFormat& out) {
+    int const value = static_cast<int>(format);
+    if (value <= static_cast<int>(AV_PIX_FMT_NONE) || value >= static_cast<int>(AV_PIX_FMT_NB))
+        return geode::Err("Invalid input pixel format.");
+
+    auto const avFormat = static_cast<AVPixelFormat>(value);
+    auto const* desc = av_pix_fmt_desc_get(avFormat);
+    if (!desc)
+        return geode::Err("Unknown input pixel format.");
+    if (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)
+        return geode::Err("Hardware pixel formats cannot be used for raw input frames.");
+
+    out = avFormat;
+    return geode::Ok();
+}
+
+/// Maps the public enum to FFmpeg's by name, so it never depends on FFmpeg's numbering.
+geode::Result<> toAVHWDeviceType(HardwareAccelerationType type, AVHWDeviceType& out) {
+    switch (type) {
+        case HardwareAccelerationType::NONE:
+            out = AV_HWDEVICE_TYPE_NONE;
+            return geode::Ok();
+        case HardwareAccelerationType::CUDA:
+            out = AV_HWDEVICE_TYPE_CUDA;
+            return geode::Ok();
+        case HardwareAccelerationType::D3D11VA:
+            out = AV_HWDEVICE_TYPE_D3D11VA;
+            return geode::Ok();
+    }
+    return geode::Err("Unknown hardware acceleration type.");
+}
+
+}
+
+class Recorder::Impl {
+public:
+    Impl() = default;
+    ~Impl() { stop(); }
+
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+
+    geode::Result<> init(const RenderSettings& settings);
+    void stop();
+    geode::Result<> writeFrame(std::span<uint8_t const> frameData);
+
+    bool isRunning() const { return m_init; }
+
+private:
+    geode::Result<> setup(const RenderSettings& settings);
+    geode::Result<> setupFilters(const RenderSettings& settings, AVPixelFormat format);
+    geode::Result<> encode(AVFrame* frame);
+    geode::Result<> drainFilters();
+    void release();
+
+    AVFormatContext* m_formatContext = nullptr;
+    const AVCodec* m_codec = nullptr;
+    AVStream* m_videoStream = nullptr;
+    AVCodecContext* m_codecContext = nullptr;
+    AVBufferRef* m_hwDevice = nullptr;
+    AVFrame* m_frame = nullptr;          // wraps the caller's data, owns no pixel buffer
+    AVFrame* m_convertedFrame = nullptr; // only when the pixel format must be converted
+    AVFrame* m_filteredFrame = nullptr;  // only when a filter graph is used
+    AVPacket* m_packet = nullptr;
+    SwsContext* m_swsCtx = nullptr;
+    AVFilterGraph* m_filterGraph = nullptr;
+    AVFilterContext* m_buffersrcCtx = nullptr;
+    AVFilterContext* m_buffersinkCtx = nullptr;
+
+    AVPixelFormat m_inputFormat = AV_PIX_FMT_NONE;
+    int64_t m_frameCount = 0;
+    size_t m_expectedSize = 0;
+    bool m_init = false;
+};
+
+// ---------------------------------------------------------------------------
+// Recorder
+// ---------------------------------------------------------------------------
+
+Recorder::Recorder() = default;
+Recorder::~Recorder() = default;
+Recorder::Recorder(Recorder&&) noexcept = default;
+Recorder& Recorder::operator=(Recorder&&) noexcept = default;
+
+geode::Result<> Recorder::init(const RenderSettings& settings) {
+    if (m_impl && m_impl->isRunning())
+        return geode::Err("Recorder is already running, call stop() before init().");
+
+    m_impl = std::make_unique<Impl>();
+    auto res = m_impl->init(settings);
+    if (res.isErr())
+        m_impl.reset();
+    return res;
+}
+
+void Recorder::stop() {
+    if (m_impl)
+        m_impl->stop();
+}
+
+geode::Result<> Recorder::writeFrame(std::span<uint8_t const> frameData) {
+    if (!m_impl)
+        return geode::Err("Recorder is not initialized.");
+    return m_impl->writeFrame(frameData);
+}
+
 std::vector<std::string> Recorder::getAvailableCodecs() {
-    std::vector<std::string> vec;
+    std::vector<std::string> codecs;
 
     void* iter = nullptr;
-    const AVCodec * codec;
+    while (const AVCodec* codec = av_codec_iterate(&iter)) {
+        if (codec->type != AVMEDIA_TYPE_VIDEO || !av_codec_is_encoder(codec))
+            continue;
 
-    while ((codec = av_codec_iterate(&iter))) {
-        if(codec->type == AVMEDIA_TYPE_VIDEO &&
-                (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC || codec->id == AV_CODEC_ID_VP8 || codec->id == AV_CODEC_ID_VP9 || codec->id == AV_CODEC_ID_AV1 || codec->id == AV_CODEC_ID_MPEG4) &&
-                avcodec_find_encoder_by_name(codec->name) != nullptr && codec->pix_fmts && std::ranges::find(vec, std::string(codec->name)) == vec.end())
-            vec.emplace_back(codec->name);
+        switch (codec->id) {
+            case AV_CODEC_ID_H264:
+            case AV_CODEC_ID_HEVC:
+            case AV_CODEC_ID_VP8:
+            case AV_CODEC_ID_VP9:
+            case AV_CODEC_ID_AV1:
+            case AV_CODEC_ID_MPEG4:
+                break;
+            default:
+                continue;
+        }
+
+        if (getSupportedPixelFormats(codec).empty())
+            continue;
+
+        codecs.emplace_back(codec->name);
     }
-    
-    return vec;
+
+    std::ranges::sort(codecs);
+    codecs.erase(std::unique(codecs.begin(), codecs.end()), codecs.end());
+    return codecs;
 }
 
-const AVCodec* getCodecByName(const std::string& name) {
-    void* iter = nullptr;
-    const AVCodec * codec;
-    while ((codec = av_codec_iterate(&iter))) {
-        if(codec->type == AVMEDIA_TYPE_VIDEO && std::string(codec->name) == name)
-            return codec;
-    }
-    return nullptr;
-}
+// ---------------------------------------------------------------------------
+// Recorder::Impl
+// ---------------------------------------------------------------------------
 
 geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
-    int ret = avformat_alloc_output_context2(&m_formatContext, NULL, NULL, settings.m_outputFile.string().c_str());
+    auto res = setup(settings);
+    if (res.isErr())
+        release();
+    return res;
+}
+
+geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
+    int ret = 0;
+
+    // --- validate the settings before touching FFmpeg or the disk ---------------
+    if (settings.m_codec.empty())
+        return geode::Err("No codec was specified.");
+    if (settings.m_outputFile.empty())
+        return geode::Err("No output file was specified.");
+    if (settings.m_fps == 0)
+        return geode::Err("The frame rate must be greater than zero.");
+    if (av_image_check_size(settings.m_width, settings.m_height, 0, nullptr) < 0) {
+        return geode::Err("Invalid video size: " + std::to_string(settings.m_width) + "x" +
+                          std::to_string(settings.m_height) + ".");
+    }
+
+    if (auto res = toAVPixelFormat(settings.m_pixelFormat, m_inputFormat); res.isErr())
+        return res;
+
+    AVHWDeviceType hwDeviceType = AV_HWDEVICE_TYPE_NONE;
+    if (auto res = toAVHWDeviceType(settings.m_hardwareAccelerationType, hwDeviceType); res.isErr())
+        return res;
+
+    m_codec = avcodec_find_encoder_by_name(settings.m_codec.c_str());
+    if (!m_codec || m_codec->type != AVMEDIA_TYPE_VIDEO)
+        return geode::Err("Could not find video encoder '" + settings.m_codec + "'.");
+
+    // --- pick the pixel format the encoder will receive --------------------------
+    std::vector<AVPixelFormat> const supported = getSupportedPixelFormats(m_codec);
+    std::vector<AVPixelFormat> softwareFormats;
+    bool usesMediaCodecSurfaces = false;
+    for (AVPixelFormat format : supported) {
+        if (format == AV_PIX_FMT_MEDIACODEC)
+            usesMediaCodecSurfaces = true;
+        else if (!isHardwareFormat(format))
+            softwareFormats.push_back(format);
+    }
+
+    AVPixelFormat encoderFormat = AV_PIX_FMT_NONE;
+    if (usesMediaCodecSurfaces) {
+        // Secretly force NV12: with AV_PIX_FMT_MEDIACODEC the encoder would go into
+        // surface mode and expect a surface instead of plain frames.
+        encoderFormat = AV_PIX_FMT_NV12;
+    } else if (std::ranges::find(softwareFormats, m_inputFormat) != softwareFormats.end()) {
+        encoderFormat = m_inputFormat;
+    } else if (!softwareFormats.empty()) {
+        encoderFormat = softwareFormats.front();
+    } else {
+        return geode::Err("Codec '" + settings.m_codec + "' does not support any pixel format usable with raw frames.");
+    }
+    geode::log::debug("Encoder {} will receive pixel format {}", settings.m_codec, av_get_pix_fmt_name(encoderFormat));
+
+    // RGB -> YUV conversion done by us is tagged as BT.709 (what players assume for HD).
+    // When the user supplies colorspace filters, they own the colour handling instead.
+    bool const tagBt709 = settings.m_colorspaceFilters.empty() && isRgbFormat(m_inputFormat) && !isRgbFormat(encoderFormat);
+
+    // --- container and encoder -----------------------------------------------------
+    std::string const outputPath = utils::pathToUtf8(settings.m_outputFile);
+
+    ret = avformat_alloc_output_context2(&m_formatContext, nullptr, nullptr, outputPath.c_str());
     if (!m_formatContext)
         return geode::Err("Could not create output context: " + utils::getErrorString(ret));
-
-    m_codec = getCodecByName(settings.m_codec);
-    if (!m_codec)
-        return geode::Err("Could not find encoder.");
 
     m_videoStream = avformat_new_stream(m_formatContext, m_codec);
     if (!m_videoStream)
@@ -56,160 +271,193 @@ geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
     if (!m_codecContext)
         return geode::Err("Could not allocate video codec context.");
 
-    if(settings.m_hardwareAccelerationType != HardwareAccelerationType::NONE && (ret = av_hwdevice_ctx_create(&m_hwDevice, (AVHWDeviceType)settings.m_hardwareAccelerationType, NULL, NULL, 0)); ret < 0)
-        return geode::Err("Could not create hardware device context: " + utils::getErrorString(ret));
+    if (hwDeviceType != AV_HWDEVICE_TYPE_NONE) {
+        ret = av_hwdevice_ctx_create(&m_hwDevice, hwDeviceType, nullptr, nullptr, 0);
+        if (ret < 0)
+            return geode::Err("Could not create hardware device context: " + utils::getErrorString(ret));
 
-    m_codecContext->hw_device_ctx = m_hwDevice ? av_buffer_ref(m_hwDevice) : nullptr;
-    m_codecContext->codec_id = m_codec->id;
-    m_codecContext->bit_rate = settings.m_bitrate;
-    m_codecContext->width = settings.m_width;
-    m_codecContext->height = settings.m_height;
-    m_codecContext->time_base = AVRational{1, settings.m_fps};
-    m_codecContext->pix_fmt = AV_PIX_FMT_NONE;
-    m_videoStream->time_base = m_codecContext->time_base;
-
-    if(!m_codecContext->pix_fmt)
-        return geode::Err("Codec does not have any supported pixel formats.");
-
-    if (const AVPixelFormat *pix_fmt = m_codec->pix_fmts) {
-        while (*pix_fmt != AV_PIX_FMT_NONE) {
-            if(*pix_fmt == AV_PIX_FMT_MEDIACODEC) {
-                // secretly force pix fmt to nv12. seems to work contrary to yuv420p.
-                // with AV_PIX_FMT_MEDIACODEC mediacodec would go into surface mode and expect a surface
-                m_codecContext->pix_fmt = AV_PIX_FMT_NV12; 
-                break;
-            }
-            if(*pix_fmt == static_cast<AVPixelFormat>(settings.m_pixelFormat))
-                m_codecContext->pix_fmt = *pix_fmt;
-            ++pix_fmt;
-        }
+        m_codecContext->hw_device_ctx = av_buffer_ref(m_hwDevice);
+        if (!m_codecContext->hw_device_ctx)
+            return geode::Err("Could not reference the hardware device context.");
     }
-    if(m_codecContext->pix_fmt == AV_PIX_FMT_NONE) {
-        geode::log::info("Codec {} does not support pixel format, defaulting to codec's format", settings.m_codec);
-        m_codecContext->pix_fmt = m_codec->pix_fmts[0];
+
+    AVRational const frameRate{static_cast<int>(settings.m_fps), 1};
+    if (settings.m_bitrate > 0)
+        m_codecContext->bit_rate = settings.m_bitrate;
+    m_codecContext->width = static_cast<int>(settings.m_width);
+    m_codecContext->height = static_cast<int>(settings.m_height);
+    m_codecContext->time_base = AVRational{1, static_cast<int>(settings.m_fps)};
+    m_codecContext->framerate = frameRate;
+    m_codecContext->sample_aspect_ratio = AVRational{1, 1};
+    m_codecContext->pix_fmt = encoderFormat;
+    if (tagBt709) {
+        m_codecContext->colorspace = AVCOL_SPC_BT709;
+        m_codecContext->color_primaries = AVCOL_PRI_BT709;
+        m_codecContext->color_trc = AVCOL_TRC_BT709;
+        m_codecContext->color_range = AVCOL_RANGE_MPEG;
     }
-    else
-        geode::log::info("Codec {} supports pixel format.", settings.m_codec);
 
-    if (ret = avcodec_open2(m_codecContext, m_codec, nullptr); ret < 0)
-        return geode::Err("Could not open codec: " + utils::getErrorString(ret));
-
+    // Must be set before the encoder is opened, or it will not emit global headers.
     if (m_formatContext->oformat->flags & AVFMT_GLOBALHEADER)
         m_codecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    if (ret = avcodec_parameters_from_context(m_videoStream->codecpar, m_codecContext); ret < 0)
+    ret = avcodec_open2(m_codecContext, m_codec, nullptr);
+    if (ret < 0)
+        return geode::Err("Could not open codec: " + utils::getErrorString(ret));
+
+    ret = avcodec_parameters_from_context(m_videoStream->codecpar, m_codecContext);
+    if (ret < 0)
         return geode::Err("Could not copy codec parameters: " + utils::getErrorString(ret));
 
-    if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
-        if (ret = avio_open(&m_formatContext->pb, settings.m_outputFile.string().c_str(), AVIO_FLAG_WRITE); ret < 0)
-            return geode::Err("Could not open output file: " + utils::getErrorString(ret));
-    }
+    m_videoStream->time_base = m_codecContext->time_base;
+    m_videoStream->avg_frame_rate = frameRate;
+    m_videoStream->r_frame_rate = frameRate;
+    m_videoStream->sample_aspect_ratio = m_codecContext->sample_aspect_ratio;
 
-    if (ret = avformat_write_header(m_formatContext, nullptr); ret < 0)
-        return geode::Err("Could not write header: " + utils::getErrorString(ret));
-
+    // --- frames, packet, converter, filters -------------------------------------------
+    // m_frame only points at the caller's data in writeFrame, so no pixel buffer is allocated.
     m_frame = av_frame_alloc();
-    m_frame->format = (AVPixelFormat)settings.m_pixelFormat;
+    m_filteredFrame = av_frame_alloc();
+    m_packet = av_packet_alloc();
+    if (!m_frame || !m_filteredFrame || !m_packet)
+        return geode::Err("Could not allocate frames or packet.");
+
+    m_frame->format = m_inputFormat;
     m_frame->width = m_codecContext->width;
     m_frame->height = m_codecContext->height;
 
-    //m_frame should always have the pixel format of the settings, if the codec does not support it, it will be converted in writeFrame
-    if (ret = av_image_alloc(m_frame->data, m_frame->linesize, m_codecContext->width, m_codecContext->height, (AVPixelFormat)settings.m_pixelFormat, 32); ret < 0)
-        return geode::Err("Could not allocate raw picture buffer: " + utils::getErrorString(ret));
+    int const expectedSize = av_image_get_buffer_size(m_inputFormat, m_frame->width, m_frame->height, 1);
+    if (expectedSize < 0)
+        return geode::Err("Could not compute the frame size: " + utils::getErrorString(expectedSize));
+    m_expectedSize = static_cast<size_t>(expectedSize);
 
-    m_convertedFrame = av_frame_alloc();
-    m_convertedFrame->format = m_codecContext->pix_fmt;
-    m_convertedFrame->width = m_codecContext->width;
-    m_convertedFrame->height = m_codecContext->height;
-    if(ret = av_image_alloc(m_convertedFrame->data, m_convertedFrame->linesize, m_convertedFrame->width, m_convertedFrame->height, m_codecContext->pix_fmt, 32); ret < 0)
-        return geode::Err("Could not allocate raw picture buffer: " + utils::getErrorString(ret));
-
-    m_filteredFrame = av_frame_alloc();
-
-    m_packet = av_packet_alloc();
-
-    m_packet->data = nullptr;
-    m_packet->size = 0;
-
-    if(!settings.m_colorspaceFilters.empty() || settings.m_doVerticalFlip) {
-        m_filterGraph = avfilter_graph_alloc();
-        if (!m_filterGraph)
-            return geode::Err("Could not allocate filter graph.");
-
-        const AVFilter* buffersrc = avfilter_get_by_name("buffer");
-        const AVFilter* buffersink = avfilter_get_by_name("buffersink");
-        const AVFilter* colorspace = avfilter_get_by_name("colorspace");
-        const AVFilter* vflip = avfilter_get_by_name("vflip");
-
-        char args[512];
-            snprintf(args, sizeof(args),
-                "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
-                m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt,
-                m_codecContext->time_base.num, m_codecContext->time_base.den,
-                m_codecContext->sample_aspect_ratio.num, m_codecContext->sample_aspect_ratio.den);
-
-        if(ret = avfilter_graph_create_filter(&m_buffersrcCtx, buffersrc, "in", args, nullptr, m_filterGraph); ret < 0) {
-            avfilter_graph_free(&m_filterGraph);
-            return geode::Err("Could not create input for filter graph: " + utils::getErrorString(ret));
-        }
-
-        if(ret = avfilter_graph_create_filter(&m_buffersinkCtx, buffersink, "out", nullptr, nullptr, m_filterGraph); ret < 0) {
-            avfilter_graph_free(&m_filterGraph);
-            return geode::Err("Could not create output for filter graph: " + utils::getErrorString(ret));
-        }
-
-        if(!settings.m_colorspaceFilters.empty()) {
-            if(ret = avfilter_graph_create_filter(&m_colorspaceCtx, colorspace, "colorspace", settings.m_colorspaceFilters.c_str(), nullptr, m_filterGraph); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not create colorspace for filter graph: " + utils::getErrorString(ret));
-            }
-
-            if(ret = avfilter_link(m_buffersrcCtx, 0, m_colorspaceCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
-
-            if(ret = avfilter_link(m_colorspaceCtx, 0, m_buffersinkCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
-        }
-
-        if(settings.m_doVerticalFlip) {
-            if(ret = avfilter_graph_create_filter(&m_vflipCtx, vflip, "vflip", nullptr, nullptr, m_filterGraph); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not create vflip for filter graph: " + utils::getErrorString(ret));
-            }
-
-            if(ret = avfilter_link(m_buffersrcCtx, 0, m_vflipCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
-
-            if(ret = avfilter_link(m_vflipCtx, 0, m_buffersinkCtx, 0); ret < 0) {
-                avfilter_graph_free(&m_filterGraph);
-                return geode::Err("Could not link filters: " + utils::getErrorString(ret));
-            }
-        }
-
-        if (ret = avfilter_graph_config(m_filterGraph, nullptr); ret < 0) {
-            avfilter_graph_free(&m_filterGraph);
-            return geode::Err("Could not configure filter graph: " + utils::getErrorString(ret));
-        }
-    }
-
-    if((AVPixelFormat)settings.m_pixelFormat != m_codecContext->pix_fmt) {
-        m_swsCtx = sws_getContext(m_codecContext->width, m_codecContext->height, (AVPixelFormat)settings.m_pixelFormat, m_codecContext->width,
-            m_codecContext->height, m_codecContext->pix_fmt, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-
+    // If the codec does not support the input pixel format, frames are converted in writeFrame.
+    if (m_inputFormat != encoderFormat) {
+        m_swsCtx = sws_getContext(
+            m_frame->width, m_frame->height, m_inputFormat,
+            m_frame->width, m_frame->height, encoderFormat,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!m_swsCtx)
             return geode::Err("Could not create sws context.");
+
+        if (tagBt709) {
+            // RGB input is full range; the output is limited range YUV using BT.709 coefficients.
+            if (sws_setColorspaceDetails(m_swsCtx, sws_getCoefficients(SWS_CS_DEFAULT), 1,
+                                         sws_getCoefficients(SWS_CS_ITU709), 0, 0, 1 << 16, 1 << 16) < 0) {
+                geode::log::warn("The pixel format conversion does not support BT.709 coefficients, colors may be slightly off.");
+            }
+        }
+
+        m_convertedFrame = av_frame_alloc();
+        if (!m_convertedFrame)
+            return geode::Err("Could not allocate the converted frame.");
+
+        m_convertedFrame->format = encoderFormat;
+        m_convertedFrame->width = m_frame->width;
+        m_convertedFrame->height = m_frame->height;
+        ret = av_frame_get_buffer(m_convertedFrame, 0);
+        if (ret < 0)
+            return geode::Err("Could not allocate the converted frame buffer: " + utils::getErrorString(ret));
+
+        if (tagBt709) {
+            m_convertedFrame->colorspace = AVCOL_SPC_BT709;
+            m_convertedFrame->color_primaries = AVCOL_PRI_BT709;
+            m_convertedFrame->color_trc = AVCOL_TRC_BT709;
+            m_convertedFrame->color_range = AVCOL_RANGE_MPEG;
+        }
     }
 
-    m_frameCount = 0;
-    m_expectedSize = av_image_get_buffer_size((AVPixelFormat)m_frame->format, m_frame->width, m_frame->height, 1);
+    if (!settings.m_colorspaceFilters.empty() || settings.m_doVerticalFlip) {
+        if (auto res = setupFilters(settings, encoderFormat); res.isErr())
+            return res;
+    }
 
+    // --- everything is ready: only now create the file and write the header -----------
+    if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
+        ret = avio_open(&m_formatContext->pb, outputPath.c_str(), AVIO_FLAG_WRITE);
+        if (ret < 0)
+            return geode::Err("Could not open output file: " + utils::getErrorString(ret));
+    }
+
+    ret = avformat_write_header(m_formatContext, nullptr);
+    if (ret < 0)
+        return geode::Err("Could not write header: " + utils::getErrorString(ret));
+
+    m_frameCount = 0;
     m_init = true;
+    return geode::Ok();
+}
+
+geode::Result<> Recorder::Impl::setupFilters(const RenderSettings& settings, AVPixelFormat format) {
+    m_filterGraph = avfilter_graph_alloc();
+    if (!m_filterGraph)
+        return geode::Err("Could not allocate filter graph.");
+
+    const AVFilter* buffersrc = avfilter_get_by_name("buffer");
+    const AVFilter* buffersink = avfilter_get_by_name("buffersink");
+    const AVFilter* formatFilter = avfilter_get_by_name("format");
+    if (!buffersrc || !buffersink || !formatFilter)
+        return geode::Err("This FFmpeg build is missing the buffer, buffersink or format filter.");
+
+    char args[512];
+    std::snprintf(args, sizeof(args),
+        "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:frame_rate=%d/%d:pixel_aspect=%d/%d",
+        m_codecContext->width, m_codecContext->height, static_cast<int>(format),
+        m_codecContext->time_base.num, m_codecContext->time_base.den,
+        m_codecContext->framerate.num, m_codecContext->framerate.den,
+        m_codecContext->sample_aspect_ratio.num, m_codecContext->sample_aspect_ratio.den);
+
+    int ret = avfilter_graph_create_filter(&m_buffersrcCtx, buffersrc, "in", args, nullptr, m_filterGraph);
+    if (ret < 0)
+        return geode::Err("Could not create input for filter graph: " + utils::getErrorString(ret));
+
+    ret = avfilter_graph_create_filter(&m_buffersinkCtx, buffersink, "out", nullptr, nullptr, m_filterGraph);
+    if (ret < 0)
+        return geode::Err("Could not create output for filter graph: " + utils::getErrorString(ret));
+
+    // Chain: in -> [colorspace] -> [vflip] -> format -> out. Every filter is linked after
+    // the previous one, so both optional filters can be active at the same time.
+    AVFilterContext* last = m_buffersrcCtx;
+    auto append = [&](const char* filterName, const char* instanceName, const char* filterArgs) -> geode::Result<> {
+        const AVFilter* filter = avfilter_get_by_name(filterName);
+        if (!filter)
+            return geode::Err(std::string("This FFmpeg build is missing the '") + filterName + "' filter.");
+
+        AVFilterContext* ctx = nullptr;
+        int r = avfilter_graph_create_filter(&ctx, filter, instanceName, filterArgs, nullptr, m_filterGraph);
+        if (r < 0)
+            return geode::Err(std::string("Could not create the '") + filterName + "' filter: " + utils::getErrorString(r));
+
+        r = avfilter_link(last, 0, ctx, 0);
+        if (r < 0)
+            return geode::Err(std::string("Could not link the '") + filterName + "' filter: " + utils::getErrorString(r));
+
+        last = ctx;
+        return geode::Ok();
+    };
+
+    if (!settings.m_colorspaceFilters.empty()) {
+        if (auto res = append("colorspace", "colorspace", settings.m_colorspaceFilters.c_str()); res.isErr())
+            return res;
+    }
+
+    if (settings.m_doVerticalFlip) {
+        if (auto res = append("vflip", "vflip", nullptr); res.isErr())
+            return res;
+    }
+
+    // Pin the output to the format the encoder was opened with.
+    std::string const formatArgs = std::string("pix_fmts=") + av_get_pix_fmt_name(format);
+    if (auto res = append("format", "format", formatArgs.c_str()); res.isErr())
+        return res;
+
+    ret = avfilter_link(last, 0, m_buffersinkCtx, 0);
+    if (ret < 0)
+        return geode::Err("Could not link the filter graph output: " + utils::getErrorString(ret));
+
+    ret = avfilter_graph_config(m_filterGraph, nullptr);
+    if (ret < 0)
+        return geode::Err("Could not configure filter graph: " + utils::getErrorString(ret));
 
     return geode::Ok();
 }
@@ -218,121 +466,145 @@ geode::Result<> Recorder::Impl::writeFrame(std::span<uint8_t const> frameData) {
     if (!m_init || !m_frame)
         return geode::Err("Recorder is not initialized.");
 
-    if(frameData.size() != m_expectedSize)
-        return geode::Err("Frame data size does not match expected dimensions.");
+    if (frameData.size() != m_expectedSize) {
+        return geode::Err("Frame data size (" + std::to_string(frameData.size()) +
+                          " bytes) does not match the expected size (" + std::to_string(m_expectedSize) + " bytes).");
+    }
 
     int ret = av_image_fill_arrays(
         m_frame->data,
         m_frame->linesize,
         frameData.data(),
-        (AVPixelFormat)m_frame->format,
+        m_inputFormat,
         m_frame->width,
         m_frame->height,
         1
     );
-
     if (ret < 0)
         return geode::Err("Failed to fill image arrays: " + utils::getErrorString(ret));
 
-    if(m_swsCtx) {
-        sws_scale(
+    int64_t const pts = m_frameCount++;
+    AVFrame* frame = m_frame;
+    frame->pts = pts;
+
+    if (m_swsCtx) {
+        // The encoder may still hold a reference to the previous converted frame.
+        ret = av_frame_make_writable(m_convertedFrame);
+        if (ret < 0)
+            return geode::Err("Could not make the converted frame writable: " + utils::getErrorString(ret));
+
+        int const scaled = sws_scale(
             m_swsCtx, m_frame->data, m_frame->linesize, 0, m_frame->height,
             m_convertedFrame->data, m_convertedFrame->linesize);
-    }
-    else {
-        av_frame_copy(m_convertedFrame, m_frame);
-        av_frame_copy_props(m_convertedFrame, m_frame);
+        if (scaled != m_frame->height)
+            return geode::Err("Failed to convert the frame to the encoder's pixel format.");
+
+        m_convertedFrame->pts = pts;
+        frame = m_convertedFrame;
     }
 
-    if(m_buffersrcCtx) {
-        geode::Result<> res = filterFrame(m_convertedFrame, m_filteredFrame);
+    if (m_buffersrcCtx) {
+        // KEEP_REF makes the filter graph copy/reference the frame instead of moving it.
+        ret = av_buffersrc_add_frame_flags(m_buffersrcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF);
+        if (ret < 0)
+            return geode::Err("Could not feed frame to filter graph: " + utils::getErrorString(ret));
 
-        if(res.isErr())
+        return drainFilters();
+    }
+
+    // Not reference counted (m_frame): the encoder copies the data during send_frame.
+    return encode(frame);
+}
+
+geode::Result<> Recorder::Impl::drainFilters() {
+    while (true) {
+        int const ret = av_buffersink_get_frame(m_buffersinkCtx, m_filteredFrame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            return geode::Ok();
+        if (ret < 0)
+            return geode::Err("Could not retrieve frame from filter graph: " + utils::getErrorString(ret));
+
+        auto res = encode(m_filteredFrame);
+        av_frame_unref(m_filteredFrame);
+        if (res.isErr())
             return res;
-
-        av_frame_copy(m_convertedFrame, m_filteredFrame);
-        av_frame_copy_props(m_convertedFrame, m_filteredFrame);
     }
+}
 
-    m_convertedFrame->pts = m_frameCount++;
-
-    ret = avcodec_send_frame(m_codecContext, m_convertedFrame);
-    if (ret < 0)
+/// Sends a frame to the encoder and writes every packet it produces.
+/// Passing nullptr flushes the encoder.
+geode::Result<> Recorder::Impl::encode(AVFrame* frame) {
+    int ret = avcodec_send_frame(m_codecContext, frame);
+    if (ret < 0 && ret != AVERROR_EOF)
         return geode::Err("Error while sending frame: " + utils::getErrorString(ret));
 
-    while (ret >= 0) {
+    while (true) {
         ret = avcodec_receive_packet(m_codecContext, m_packet);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-            break;
+            return geode::Ok();
         if (ret < 0)
             return geode::Err("Error while receiving packet: " + utils::getErrorString(ret));
 
         av_packet_rescale_ts(m_packet, m_codecContext->time_base, m_videoStream->time_base);
         m_packet->stream_index = m_videoStream->index;
 
-        av_interleaved_write_frame(m_formatContext, m_packet);
-        av_packet_unref(m_packet);
+        // The muxer takes ownership of the packet, even when writing fails.
+        ret = av_interleaved_write_frame(m_formatContext, m_packet);
+        if (ret < 0)
+            return geode::Err("Error while writing packet: " + utils::getErrorString(ret));
     }
-
-    av_frame_unref(m_filteredFrame);
-
-    return geode::Ok();
-}
-
-geode::Result<> Recorder::Impl::filterFrame(AVFrame* inputFrame, AVFrame* outputFrame) {
-    int ret = 0;
-    if (ret = av_buffersrc_add_frame(m_buffersrcCtx, inputFrame); ret < 0) {
-        avfilter_graph_free(&m_filterGraph);
-        return geode::Err("Could not feed frame to filter graph: " + utils::getErrorString(ret));
-    }
-
-    if (ret = av_buffersink_get_frame(m_buffersinkCtx, outputFrame); ret < 0) {
-        av_frame_unref(outputFrame);
-        return geode::Err("Could not retrieve frame from filter graph: " + utils::getErrorString(ret));
-    }
-
-    return geode::Ok();
 }
 
 void Recorder::Impl::stop() {
-    if(m_codecContext && m_videoStream && m_formatContext && m_packet) {
-        avcodec_send_frame(m_codecContext, nullptr);
-        while (avcodec_receive_packet(m_codecContext, m_packet) == 0) {
-            av_packet_rescale_ts(m_packet, m_codecContext->time_base, m_videoStream->time_base);
-            m_packet->stream_index = m_videoStream->index;
-            av_interleaved_write_frame(m_formatContext, m_packet);
-            av_packet_unref(m_packet);
+    if (m_init) {
+        m_init = false;
+
+        if (m_buffersrcCtx) {
+            int const ret = av_buffersrc_add_frame(m_buffersrcCtx, nullptr);
+            if (ret < 0)
+                geode::log::warn("Could not flush the filter graph: {}", utils::getErrorString(ret));
+            else if (auto res = drainFilters(); res.isErr())
+                geode::log::warn("Could not drain the filter graph: {}", res.unwrapErr());
         }
+
+        if (auto res = encode(nullptr); res.isErr())
+            geode::log::warn("Could not flush the encoder: {}", res.unwrapErr());
+
+        int const ret = av_write_trailer(m_formatContext);
+        if (ret < 0)
+            geode::log::warn("Could not write the trailer: {}", utils::getErrorString(ret));
     }
 
-    if(m_formatContext)
-        av_write_trailer(m_formatContext);
+    release();
+}
 
-    if(m_codecContext)
-        avcodec_free_context(&m_codecContext);
-
-    if(m_frame)
-        av_frame_free(&m_frame);
-    if(m_convertedFrame)
-        av_frame_free(&m_convertedFrame);
-
-    if(m_formatContext) {
-        if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
-            avio_close(m_formatContext->pb);
-        }
+/// Frees everything. Safe to call repeatedly and on a partially initialized recorder.
+void Recorder::Impl::release() {
+    if (m_formatContext) {
+        if (!(m_formatContext->oformat->flags & AVFMT_NOFILE))
+            avio_closep(&m_formatContext->pb);
         avformat_free_context(m_formatContext);
+        m_formatContext = nullptr;
+        m_videoStream = nullptr;
     }
 
-    if(m_filterGraph) {
-        avfilter_graph_free(&m_filterGraph);
-        av_frame_free(&m_filteredFrame);
-    }
+    avcodec_free_context(&m_codecContext);
+    av_frame_free(&m_frame);
+    av_frame_free(&m_convertedFrame);
+    av_frame_free(&m_filteredFrame);
+    av_packet_free(&m_packet);
 
-    if (m_hwDevice)
-        av_buffer_unref(&m_hwDevice);
+    sws_freeContext(m_swsCtx);
+    m_swsCtx = nullptr;
 
-    if(m_packet)
-        av_packet_free(&m_packet);
+    avfilter_graph_free(&m_filterGraph); // also frees the filters it owns
+    m_buffersrcCtx = nullptr;
+    m_buffersinkCtx = nullptr;
+
+    av_buffer_unref(&m_hwDevice);
+
+    m_codec = nullptr;
+    m_init = false;
 }
 
 END_FFMPEG_NAMESPACE_V

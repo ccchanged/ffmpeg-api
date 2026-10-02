@@ -5,113 +5,82 @@
 
 #include <Geode/Result.hpp>
 
-#include <vector>
-#include <string>
+#include <cstdint>
 #include <memory>
-#include <unordered_map>
-
-class AVFormatContext;
-class AVCodec;
-class AVStream;
-class AVCodecContext;
-class AVBufferRef;
-class AVFrame;
-class AVPacket;
-class SwsContext;
-class AVFilterContext;
-class AVFilter;
-class AVFilterGraph;
+#include <span>
+#include <string>
+#include <vector>
 
 BEGIN_FFMPEG_NAMESPACE_V
 
+/**
+ * Encodes raw frames into a video file.
+ *
+ * All FFmpeg state lives behind the pimpl in the FFmpeg API mod, so this header
+ * needs no FFmpeg includes and every method is exported from the mod's DLL.
+ *
+ * Typical use: `init()`, then `writeFrame()` once per frame, then `stop()`.
+ * If `stop()` is forgotten the destructor finalizes the file, but calling it
+ * yourself is preferred so nothing happens implicitly.
+ */
 class FFMPEG_API_DLL Recorder {
-private:
-    class Impl {
-    public:
-        AVFormatContext* m_formatContext = nullptr;
-        const AVCodec* m_codec = nullptr;
-        AVStream* m_videoStream = nullptr;
-        AVCodecContext* m_codecContext = nullptr;
-        AVBufferRef* m_hwDevice = nullptr;
-        AVFrame* m_frame = nullptr;
-        AVFrame* m_convertedFrame = nullptr;
-        AVFrame* m_filteredFrame = nullptr;
-        AVPacket* m_packet = nullptr;
-        SwsContext* m_swsCtx = nullptr;
-        AVFilterGraph* m_filterGraph = nullptr;
-        AVFilterContext* m_buffersrcCtx = nullptr;
-        AVFilterContext* m_buffersinkCtx = nullptr;
-        AVFilterContext* m_colorspaceCtx = nullptr;
-        AVFilterContext* m_vflipCtx = nullptr;
-
-        size_t m_frameCount = 0;
-        size_t m_expectedSize = 0;
-        bool m_init = false;
-
-        geode::Result<> init(const RenderSettings& settings);
-        void stop();
-        geode::Result<> writeFrame(std::span<uint8_t const> frameData);
-        geode::Result<> filterFrame(AVFrame* inputFrame, AVFrame* outputFrame);
-    };
-
-    std::unique_ptr<Impl> m_impl = nullptr;
-
 public:
+    Recorder();
+    ~Recorder();
+
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+    Recorder(Recorder&&) noexcept;
+    Recorder& operator=(Recorder&&) noexcept;
+
     /**
      * @brief Initializes the Recorder with the specified rendering settings.
      *
-     * This function configures the recorder with the given render settings,
-     * allocates necessary resources, and prepares for video encoding.
+     * Validates the settings, opens the encoder and the output file and writes the
+     * container header. Nothing is created on disk if validation or encoder setup fails.
      *
-     * @param settings The rendering settings that define the output characteristics, 
+     * @param settings The rendering settings that define the output characteristics,
      *                 including codec, bitrate, resolution, and pixel format.
-     * 
-     * @return true if initialization is successful, false otherwise.
+     *
+     * @return Ok on success, otherwise an error describing what went wrong.
+     *         Fails if this Recorder is still recording; call `stop()` first.
      */
-    geode::Result<> init(const RenderSettings& settings) {
-        m_impl = std::make_unique<Impl>();
-        return m_impl->init(settings);
-    }
+    [[nodiscard]] geode::Result<> init(const RenderSettings& settings);
 
     /**
      * @brief Stops the recording process and finalizes the output file.
      *
-     * This function ensures that all buffered frames are written to the output file,
-     * releases allocated resources, and properly closes the output file.
+     * Flushes the encoder, writes the container trailer and releases every resource.
+     * Safe to call more than once, and safe to call on a Recorder that was never
+     * initialized.
      */
-    void stop() const { m_impl->stop(); }
+    void stop();
 
     /**
      * @brief Writes a single video frame to the output.
      *
-     * This function takes the frame data as a byte vector and encodes it 
-     * to the output file. The frame data must match the expected format and 
-     * dimensions defined during initialization.
+     * The data is read immediately and not kept, so the buffer may be reused as soon
+     * as this returns.
      *
-     * @param frameData A vector containing the raw frame data to be written.
-     * 
-     * @return true if the frame is successfully written, false if there is an error.
-     * 
-     * @warning Ensure that the frameData size matches the expected dimensions of the frame.
+     * @param frameData The raw frame, tightly packed (no row padding), in the pixel
+     *                  format and size given in the settings.
+     *
+     * @return Ok on success, otherwise an error (for example when the size of
+     *         `frameData` does not match the settings).
      */
-    geode::Result<> writeFrame(std::span<uint8_t const> frameData) const {
-        return m_impl->writeFrame(frameData);
-    }
+    [[nodiscard]] geode::Result<> writeFrame(std::span<uint8_t const> frameData);
 
     /**
      * @brief Retrieves a list of available codecs for video encoding.
      *
-     * This function iterates through all available codecs in FFmpeg and 
-     * returns a sorted vector of codec names.
-     * 
-     * @return A vector representing the names of available codecs.
+     * Returns the names of the supported H.264, HEVC, VP8, VP9, AV1 and MPEG-4
+     * encoders of this FFmpeg build, sorted alphabetically.
      */
-    static std::vector<std::string> getAvailableCodecs();
+    [[nodiscard]] static std::vector<std::string> getAvailableCodecs();
 
 private:
-    geode::Result<> filterFrame(AVFrame* inputFrame, AVFrame* outputFrame) const {
-        return m_impl->filterFrame(inputFrame, outputFrame);
-    }
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 
 END_FFMPEG_NAMESPACE_V
