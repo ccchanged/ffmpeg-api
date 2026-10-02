@@ -16,15 +16,16 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef SWSCALE_VERSION_MAJOR_H
-#define SWSCALE_VERSION_MAJOR_H
+#ifndef AVDEVICE_VERSION_MAJOR_H
+#define AVDEVICE_VERSION_MAJOR_H
 
 /**
  * @file
- * swscale version macros
+ * @ingroup lavd
+ * Libavdevice version macros
  */
 
-#define LIBSWSCALE_VERSION_MAJOR   9
+#define LIBAVDEVICE_VERSION_MAJOR  62
 
 /**
  * FF_API_* defines may be placed below to indicate public API that will be
@@ -32,4 +33,6 @@
  * the public API and may change, break or disappear at any time.
  */
 
-#endif /* SWSCALE_VERSION_MAJOR_H */
+#define FF_API_ALSA_CHANNELS (LIBAVDEVICE_VERSION_MAJOR < 63)
+
+#endif /* AVDEVICE_VERSION_MAJOR_H */
