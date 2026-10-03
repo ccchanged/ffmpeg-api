@@ -578,12 +578,12 @@ geode::Result<> AudioMixer::mixVideoAudio(const std::filesystem::path& videoFile
     return mixSamples(videoFile, pcm, kSampleRate, outputMp4File);
 }
 
-geode::Result<> AudioMixer::mixVideoRaw(const std::filesystem::path& videoFile, std::span<float const> raw, const std::filesystem::path& outputMp4File) {
+geode::Result<> AudioMixer::mixVideoRaw(const std::filesystem::path& videoFile, std::span<float> raw, const std::filesystem::path& outputMp4File) {
     if (raw.empty())
         return geode::Err("No audio data was provided.");
     if (raw.size() % kChannels != 0)
         return geode::Err("Raw audio must be interleaved stereo (an even number of samples).");
-    return mixSamples(videoFile, raw, 0, outputMp4File);
+    return mixSamples(videoFile, std::span<float const>(raw.data(), raw.size()), 0, outputMp4File);
 }
 
 END_FFMPEG_NAMESPACE_V

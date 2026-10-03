@@ -15,6 +15,8 @@ BEGIN_FFMPEG_NAMESPACE_V
  *
  * On failure a partially written output file is deleted again.
  */
+// ABI NOTE: mods built against older versions link to these exact signatures, so they
+// must not change (not even `std::span<float>` -> `std::span<float const>`).
 class FFMPEG_API_DLL AudioMixer {
 public:
     AudioMixer() = delete;
@@ -35,7 +37,7 @@ public:
      *
      * @warning Only the first video stream of `videoFile` is copied, other streams are dropped.
      */
-    [[nodiscard]] static geode::Result<> mixVideoAudio(const std::filesystem::path& videoFile, const std::filesystem::path& audioFile, const std::filesystem::path& outputMp4File);
+    static geode::Result<> mixVideoAudio(const std::filesystem::path& videoFile, const std::filesystem::path& audioFile, const std::filesystem::path& outputMp4File);
 
     /**
      * @brief Mixes a video file and raw audio data into a single MP4 output.
@@ -47,12 +49,13 @@ public:
      *
      * @param videoFile The path to the input video file.
      * @param raw Interleaved stereo float samples (L, R, L, R, ...), so an even count.
+     *            Only read, never modified.
      * @param outputMp4File The path where the output MP4 file will be saved. Must differ
      *                      from `videoFile`.
      *
      * @warning Only the first video stream of `videoFile` is copied, other streams are dropped.
      */
-    [[nodiscard]] static geode::Result<> mixVideoRaw(const std::filesystem::path& videoFile, std::span<float const> raw, const std::filesystem::path& outputMp4File);
+    static geode::Result<> mixVideoRaw(const std::filesystem::path& videoFile, std::span<float> raw, const std::filesystem::path& outputMp4File);
 };
 
 END_FFMPEG_NAMESPACE_V

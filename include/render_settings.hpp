@@ -9,15 +9,16 @@
 BEGIN_FFMPEG_NAMESPACE_V
 
 /**
- * Pixel formats accepted for the raw frames passed to `Recorder::writeFrame`.
+ * Pixel formats for the raw frames passed to `Recorder::writeFrame`.
  *
  * The numbers mirror FFmpeg's `AVPixelFormat`; FFmpeg only ever appends new formats,
- * so they stay valid across releases. They are spelled out so removing an entry can
+ * so they stay valid across releases. They are spelled out so editing this list can
  * never shift the others, and `src/pixel_format_check.inc` verifies every one of them
  * against the FFmpeg headers at compile time.
  *
- * Hardware-surface formats (MEDIACODEC, VULKAN, ...) are intentionally absent: frames
- * are always plain CPU memory.
+ * Hardware-surface formats (VAAPI, CUDA, MEDIACODEC, ...) are listed only to keep old
+ * code compiling. Frames are always plain CPU memory, so using one is rejected with
+ * an error.
  */
 enum class PixelFormat : int {
     NONE           = -1,
@@ -65,12 +66,14 @@ enum class PixelFormat : int {
     BGR565LE       = 41,
     BGR555BE       = 42,
     BGR555LE       = 43,
+    VAAPI          = 44,
     YUV420P16LE    = 45,
     YUV420P16BE    = 46,
     YUV422P16LE    = 47,
     YUV422P16BE    = 48,
     YUV444P16LE    = 49,
     YUV444P16BE    = 50,
+    DXVA2_VLD      = 51,
     RGB444LE       = 52,
     RGB444BE       = 53,
     BGR444LE       = 54,
@@ -120,6 +123,7 @@ enum class PixelFormat : int {
     YUVA422P16LE   = 95,
     YUVA444P16BE   = 96,
     YUVA444P16LE   = 97,
+    VDPAU          = 98,
     XYZ12LE        = 99,
     XYZ12BE        = 100,
     NV16           = 101,
@@ -135,6 +139,10 @@ enum class PixelFormat : int {
     GBRAP          = 111,
     GBRAP16BE      = 112,
     GBRAP16LE      = 113,
+    QSV            = 114,
+    MMAL           = 115,
+    D3D11VA_VLD    = 116,
+    CUDA           = 117,
     _0RGB          = 118,
     RGB0           = 119,
     _0BGR          = 120,
@@ -174,24 +182,29 @@ enum class PixelFormat : int {
     YUV440P12BE    = 154,
     AYUV64LE       = 155,
     AYUV64BE       = 156,
+    VIDEOTOOLBOX   = 157,
     P010LE         = 158,
     P010BE         = 159,
     GBRAP12BE      = 160,
     GBRAP12LE      = 161,
     GBRAP10BE      = 162,
     GBRAP10LE      = 163,
+    MEDIACODEC     = 164,
     GRAY12BE       = 165,
     GRAY12LE       = 166,
     GRAY10BE       = 167,
     GRAY10LE       = 168,
     P016LE         = 169,
     P016BE         = 170,
+    D3D11          = 171,
     GRAY9BE        = 172,
     GRAY9LE        = 173,
     GBRPF32BE      = 174,
     GBRPF32LE      = 175,
     GBRAPF32BE     = 176,
     GBRAPF32LE     = 177,
+    DRM_PRIME      = 178,
+    OPENCL         = 179,
     GRAY14BE       = 180,
     GRAY14LE       = 181,
     GRAYF32BE      = 182,
@@ -202,6 +215,7 @@ enum class PixelFormat : int {
     YUVA444P12LE   = 187,
     NV24           = 188,
     NV42           = 189,
+    VULKAN         = 190,
     Y210BE         = 191,
     Y210LE         = 192,
     X2RGB10LE      = 193,
@@ -238,6 +252,8 @@ enum class PixelFormat : int {
     P412LE         = 224,
     GBRAP14BE      = 225,
     GBRAP14LE      = 226,
+    D3D12          = 227,
+    NB             = 228,
 };
 
 /**
@@ -252,6 +268,8 @@ enum class HardwareAccelerationType : int {
     D3D11VA = 7,
 };
 
+// NOTE: the layout of RenderSettings is part of the ABI, mods built against older versions
+// pass it to the API. Do not add, remove, reorder or retype members.
 struct RenderSettings {
     /// Hardware device for the encoder, see above. Leave at `NONE` on Android.
     HardwareAccelerationType m_hardwareAccelerationType = HardwareAccelerationType::NONE;

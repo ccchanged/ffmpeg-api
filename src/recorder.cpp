@@ -87,78 +87,6 @@ geode::Result<> toAVHWDeviceType(HardwareAccelerationType type, AVHWDeviceType& 
 
 }
 
-class Recorder::Impl {
-public:
-    Impl() = default;
-    ~Impl() { stop(); }
-
-    Impl(const Impl&) = delete;
-    Impl& operator=(const Impl&) = delete;
-
-    geode::Result<> init(const RenderSettings& settings);
-    void stop();
-    geode::Result<> writeFrame(std::span<uint8_t const> frameData);
-
-    bool isRunning() const { return m_init; }
-
-private:
-    geode::Result<> setup(const RenderSettings& settings);
-    geode::Result<> setupFilters(const RenderSettings& settings, AVPixelFormat format);
-    geode::Result<> encode(AVFrame* frame);
-    geode::Result<> drainFilters();
-    void release();
-
-    AVFormatContext* m_formatContext = nullptr;
-    const AVCodec* m_codec = nullptr;
-    AVStream* m_videoStream = nullptr;
-    AVCodecContext* m_codecContext = nullptr;
-    AVBufferRef* m_hwDevice = nullptr;
-    AVFrame* m_frame = nullptr;          // wraps the caller's data, owns no pixel buffer
-    AVFrame* m_convertedFrame = nullptr; // only when the pixel format must be converted
-    AVFrame* m_filteredFrame = nullptr;  // only when a filter graph is used
-    AVPacket* m_packet = nullptr;
-    SwsContext* m_swsCtx = nullptr;
-    AVFilterGraph* m_filterGraph = nullptr;
-    AVFilterContext* m_buffersrcCtx = nullptr;
-    AVFilterContext* m_buffersinkCtx = nullptr;
-
-    AVPixelFormat m_inputFormat = AV_PIX_FMT_NONE;
-    int64_t m_frameCount = 0;
-    size_t m_expectedSize = 0;
-    bool m_init = false;
-};
-
-// ---------------------------------------------------------------------------
-// Recorder
-// ---------------------------------------------------------------------------
-
-Recorder::Recorder() = default;
-Recorder::~Recorder() = default;
-Recorder::Recorder(Recorder&&) noexcept = default;
-Recorder& Recorder::operator=(Recorder&&) noexcept = default;
-
-geode::Result<> Recorder::init(const RenderSettings& settings) {
-    if (m_impl && m_impl->isRunning())
-        return geode::Err("Recorder is already running, call stop() before init().");
-
-    m_impl = std::make_unique<Impl>();
-    auto res = m_impl->init(settings);
-    if (res.isErr())
-        m_impl.reset();
-    return res;
-}
-
-void Recorder::stop() {
-    if (m_impl)
-        m_impl->stop();
-}
-
-geode::Result<> Recorder::writeFrame(std::span<uint8_t const> frameData) {
-    if (!m_impl)
-        return geode::Err("Recorder is not initialized.");
-    return m_impl->writeFrame(frameData);
-}
-
 std::vector<std::string> Recorder::getAvailableCodecs() {
     std::vector<std::string> codecs;
 
@@ -195,6 +123,10 @@ std::vector<std::string> Recorder::getAvailableCodecs() {
 // ---------------------------------------------------------------------------
 
 geode::Result<> Recorder::Impl::init(const RenderSettings& settings) {
+    // Mods built against older versions allocate Impl themselves. Adding or changing a data
+    // member would make them write past their allocation, so fail the build instead.
+    static_assert(sizeof(Impl) == 18 * sizeof(void*), "Recorder::Impl layout is part of the ABI, see recorder.hpp");
+
     auto res = setup(settings);
     if (res.isErr())
         release();
@@ -216,7 +148,8 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
                           std::to_string(settings.m_height) + ".");
     }
 
-    if (auto res = toAVPixelFormat(settings.m_pixelFormat, m_inputFormat); res.isErr())
+    AVPixelFormat inputFormat = AV_PIX_FMT_NONE;
+    if (auto res = toAVPixelFormat(settings.m_pixelFormat, inputFormat); res.isErr())
         return res;
 
     AVHWDeviceType hwDeviceType = AV_HWDEVICE_TYPE_NONE;
@@ -243,8 +176,8 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
         // Secretly force NV12: with AV_PIX_FMT_MEDIACODEC the encoder would go into
         // surface mode and expect a surface instead of plain frames.
         encoderFormat = AV_PIX_FMT_NV12;
-    } else if (std::ranges::find(softwareFormats, m_inputFormat) != softwareFormats.end()) {
-        encoderFormat = m_inputFormat;
+    } else if (std::ranges::find(softwareFormats, inputFormat) != softwareFormats.end()) {
+        encoderFormat = inputFormat;
     } else if (!softwareFormats.empty()) {
         encoderFormat = softwareFormats.front();
     } else {
@@ -254,7 +187,7 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
 
     // RGB -> YUV conversion done by us is tagged as BT.709 (what players assume for HD).
     // When the user supplies colorspace filters, they own the colour handling instead.
-    bool const tagBt709 = settings.m_colorspaceFilters.empty() && isRgbFormat(m_inputFormat) && !isRgbFormat(encoderFormat);
+    bool const tagBt709 = settings.m_colorspaceFilters.empty() && isRgbFormat(inputFormat) && !isRgbFormat(encoderFormat);
 
     // --- container and encoder -----------------------------------------------------
     std::string const outputPath = utils::pathToUtf8(settings.m_outputFile);
@@ -322,19 +255,19 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
     if (!m_frame || !m_filteredFrame || !m_packet)
         return geode::Err("Could not allocate frames or packet.");
 
-    m_frame->format = m_inputFormat;
+    m_frame->format = inputFormat;
     m_frame->width = m_codecContext->width;
     m_frame->height = m_codecContext->height;
 
-    int const expectedSize = av_image_get_buffer_size(m_inputFormat, m_frame->width, m_frame->height, 1);
+    int const expectedSize = av_image_get_buffer_size(inputFormat, m_frame->width, m_frame->height, 1);
     if (expectedSize < 0)
         return geode::Err("Could not compute the frame size: " + utils::getErrorString(expectedSize));
     m_expectedSize = static_cast<size_t>(expectedSize);
 
     // If the codec does not support the input pixel format, frames are converted in writeFrame.
-    if (m_inputFormat != encoderFormat) {
+    if (inputFormat != encoderFormat) {
         m_swsCtx = sws_getContext(
-            m_frame->width, m_frame->height, m_inputFormat,
+            m_frame->width, m_frame->height, inputFormat,
             m_frame->width, m_frame->height, encoderFormat,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!m_swsCtx)
@@ -368,7 +301,7 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
     }
 
     if (!settings.m_colorspaceFilters.empty() || settings.m_doVerticalFlip) {
-        if (auto res = setupFilters(settings, encoderFormat); res.isErr())
+        if (auto res = setupFilters(settings, static_cast<int>(encoderFormat)); res.isErr())
             return res;
     }
 
@@ -388,7 +321,8 @@ geode::Result<> Recorder::Impl::setup(const RenderSettings& settings) {
     return geode::Ok();
 }
 
-geode::Result<> Recorder::Impl::setupFilters(const RenderSettings& settings, AVPixelFormat format) {
+geode::Result<> Recorder::Impl::setupFilters(const RenderSettings& settings, int pixelFormat) {
+    auto const format = static_cast<AVPixelFormat>(pixelFormat);
     m_filterGraph = avfilter_graph_alloc();
     if (!m_filterGraph)
         return geode::Err("Could not allocate filter graph.");
@@ -475,7 +409,7 @@ geode::Result<> Recorder::Impl::writeFrame(std::span<uint8_t const> frameData) {
         m_frame->data,
         m_frame->linesize,
         frameData.data(),
-        m_inputFormat,
+        static_cast<AVPixelFormat>(m_frame->format),
         m_frame->width,
         m_frame->height,
         1
@@ -483,7 +417,7 @@ geode::Result<> Recorder::Impl::writeFrame(std::span<uint8_t const> frameData) {
     if (ret < 0)
         return geode::Err("Failed to fill image arrays: " + utils::getErrorString(ret));
 
-    int64_t const pts = m_frameCount++;
+    int64_t const pts = static_cast<int64_t>(m_frameCount++);
     AVFrame* frame = m_frame;
     frame->pts = pts;
 

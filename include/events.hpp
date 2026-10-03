@@ -25,7 +25,7 @@ namespace impl {
     using WriteFrame_t = geode::Result<>(*)(void*, std::span<uint8_t const>);
     using GetAvailableCodecs_t = std::vector<std::string>(*)();
     using MixVideoAudio_t = geode::Result<>(*)(const std::filesystem::path&, const std::filesystem::path&, const std::filesystem::path&);
-    using MixVideoRaw_t = geode::Result<>(*)(const std::filesystem::path&, std::span<float const>, const std::filesystem::path&);
+    using MixVideoRaw_t = geode::Result<>(*)(const std::filesystem::path&, std::span<float>, const std::filesystem::path&);
 
     struct VTable {
         CreateRecorder_t createRecorder = nullptr;
@@ -110,7 +110,7 @@ public:
      *
      * @return Ok on success, otherwise an error describing what went wrong.
      */
-    [[nodiscard]] geode::Result<> init(RenderSettings const& settings) {
+    geode::Result<> init(RenderSettings const& settings) {
         auto const& vtable = impl::getVTable();
         if (!m_ptr || !vtable.initRecorder) {
             return geode::Err("FFmpeg API is not available.");
@@ -141,7 +141,7 @@ public:
      * @return Ok on success, otherwise an error (for example when the size of
      *         `frameData` does not match the settings).
      */
-    [[nodiscard]] geode::Result<> writeFrame(std::span<uint8_t const> frameData) {
+    geode::Result<> writeFrame(std::span<uint8_t const> frameData) {
         auto const& vtable = impl::getVTable();
         if (!m_ptr || !vtable.writeFrame) {
             return geode::Err("FFmpeg API is not available.");
@@ -155,7 +155,7 @@ public:
      * @return The names of the available encoders, sorted alphabetically. Empty if the
      *         FFmpeg API mod is not available.
      */
-    [[nodiscard]] static std::vector<std::string> getAvailableCodecs() {
+    static std::vector<std::string> getAvailableCodecs() {
         auto const& vtable = impl::getVTable();
         if (!vtable.getAvailableCodecs) {
             return {};
@@ -199,7 +199,7 @@ public:
      *
      * @warning Only the first video stream of `videoFile` is copied, other streams are dropped.
      */
-    [[nodiscard]] static geode::Result<> mixVideoAudio(std::filesystem::path const& videoFile, std::filesystem::path const& audioFile, std::filesystem::path const& outputMp4File) {
+    static geode::Result<> mixVideoAudio(std::filesystem::path const& videoFile, std::filesystem::path const& audioFile, std::filesystem::path const& outputMp4File) {
         auto const& vtable = impl::getVTable();
         if (!vtable.mixVideoAudio) {
             return geode::Err("FFmpeg API is not available.");
@@ -221,7 +221,7 @@ public:
      *
      * @warning Only the first video stream of `videoFile` is copied, other streams are dropped.
      */
-    [[nodiscard]] static geode::Result<> mixVideoRaw(std::filesystem::path const& videoFile, std::span<float const> raw, std::filesystem::path const& outputMp4File) {
+    static geode::Result<> mixVideoRaw(std::filesystem::path const& videoFile, std::span<float> raw, std::filesystem::path const& outputMp4File) {
         auto const& vtable = impl::getVTable();
         if (!vtable.mixVideoRaw) {
             return geode::Err("FFmpeg API is not available.");
