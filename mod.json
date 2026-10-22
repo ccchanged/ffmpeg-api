@@ -15,6 +15,6 @@
     "description": "Interaction with FFmpeg made easy",
     "tags": ["utility", "offline", "developer", "api"],
     "links": {
-        "source": "https://github.com/EclipseMenu/ffmpeg-api",
+        "source": "https://github.com/EclipseMenu/ffmpeg-api"
     }
 }
