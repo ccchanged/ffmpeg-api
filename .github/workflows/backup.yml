@@ -1,0 +1,69 @@
+name: noname
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    branches:
+      - "**"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - name: Android32
+          os: ubuntu-latest
+          target: Android32
+          min-sdk: 24
+
+        - name: Android64
+          os: ubuntu-latest
+          target: Android64
+
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Own The Libs (Checkout)
+        uses: actions/checkout@v4
+        with:
+          repository: ccchanged/ffmpeg-libs
+          ref: ${{ matrix.config.name }}
+          token: ${{ secrets.FFMPEG_LIBS_TOKEN }}
+          path: ffmpeg-libs
+
+      - name: Own The Libs (Extract)
+        run: 7z x ffmpeg-libs/lib/lib.7z -olib
+
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          bindings: geode-sdk/bindings
+          bindings-ref: main
+          combine: true
+          target: ${{ matrix.config.target }}
+          android-min-sdk: ${{ matrix.config.min-sdk || 23 }}
+
+  package:
+    name: Package builds
+    runs-on: ubuntu-latest
+    needs: ['build']
+
+    steps:
+      - uses: geode-sdk/build-geode-mod/combine@main
+        id: build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Build Output
+          path: ${{ steps.build.outputs.build-output }}

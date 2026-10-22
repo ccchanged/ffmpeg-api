@@ -22,11 +22,13 @@ jobs:
         - name: Android32
           os: ubuntu-latest
           target: Android32
+          abi: armeabi-v7a
           min-sdk: 24
 
         - name: Android64
           os: ubuntu-latest
           target: Android64
+          abi: arm64-v8a
 
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
@@ -44,7 +46,16 @@ jobs:
           path: ffmpeg-libs
 
       - name: Own The Libs (Extract)
-        run: 7z x ffmpeg-libs/lib/lib.7z -olib
+        run: |
+          # Works whatever folder layout lib.7z has inside: every lib*.a is copied to lib/<abi>/,
+          # which is where CMakeLists.txt looks for them.
+          7z x ffmpeg-libs/lib/lib.7z -olib_extracted
+          echo "--- contents of lib.7z:"
+          find lib_extracted | sort
+          mkdir -p lib/${{ matrix.config.abi }}
+          find lib_extracted -type f -name 'lib*.a' -exec cp -v {} lib/${{ matrix.config.abi }}/ \;
+          echo "--- prepared lib/${{ matrix.config.abi }}:"
+          ls -la lib/${{ matrix.config.abi }}
 
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
