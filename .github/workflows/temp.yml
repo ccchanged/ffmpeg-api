@@ -49,7 +49,7 @@ jobs:
         uses: geode-sdk/build-geode-mod@main
         with:
           bindings: geode-sdk/bindings
-          bindings-ref: 454a1244ab8982515d19407af782e2d6454055ee
+          bindings-ref: 016dac1113d0458cc114e5840057f725b06a438a
           combine: true
           target: ${{ matrix.config.target }}
           android-min-sdk: ${{ matrix.config.min-sdk || 23 }}
