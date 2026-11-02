@@ -62,7 +62,7 @@ jobs:
         with:
           sdk: v6.0.0-alpha.1
           bindings: geode-sdk/bindings
-          bindings-ref: main
+          bindings-ref: 454a1244ab8982515d19407af782e2d6454055ee
           combine: true
           target: ${{ matrix.config.target }}
           android-min-sdk: ${{ matrix.config.min-sdk || 23 }}
