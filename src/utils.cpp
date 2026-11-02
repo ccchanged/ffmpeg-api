@@ -1,7 +1,6 @@
 #include "utils.hpp"
 
 #include <Geode/loader/ModEvent.hpp>
-#include <vector>
 
 extern "C" {
     #include <libavutil/log.h>

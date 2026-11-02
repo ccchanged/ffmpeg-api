@@ -6,9 +6,6 @@
 #include <Geode/Result.hpp>
 
 #include <vector>
-#include <span>
-#include <cstddef>
-#include <cstdint>
 #include <string>
 #include <memory>
 #include <unordered_map>

@@ -3,11 +3,6 @@
 #include "render_settings.hpp"
 
 #include <Geode/loader/Event.hpp>
-#include <Geode/Result.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <vector>
 
 namespace ffmpeg::events {
 namespace impl {

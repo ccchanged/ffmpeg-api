@@ -1,7 +1,5 @@
 #include "recorder.hpp"
 #include "utils.hpp"
-#include <Geode/loader/Log.hpp>
-#include <algorithm>
 
 extern "C" {
     #include <libavcodec/avcodec.h>

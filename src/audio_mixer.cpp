@@ -1,7 +1,5 @@
 #include "audio_mixer.hpp"
 #include "utils.hpp"
-#include <algorithm>
-#include <vector>
 
 extern "C" {
     #include <libavcodec/avcodec.h>

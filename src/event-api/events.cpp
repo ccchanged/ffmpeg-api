@@ -1,7 +1,6 @@
 #include "events.hpp"
 #include "recorder.hpp"
 #include "audio_mixer.hpp"
-#include <Geode/Geode.hpp>
 
 using namespace geode::prelude;
 
