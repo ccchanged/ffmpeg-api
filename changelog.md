@@ -1,6 +1,12 @@
+# 3.0.0
+- Port to Geode v6
+
 # 2.1.0
 - Updated to FFmpeg 8.1.2
 - iOS, Windows and MacOS is not supported by now.
+
+# 2.0.0
+- Port to Geode v5
 
 # 1.2.2
 - Fix Android/macOS ABI
