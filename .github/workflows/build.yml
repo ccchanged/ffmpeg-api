@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "**"
+      - "v6-port"
 
 jobs:
   build:
