@@ -5,7 +5,7 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
 # Keep the version in sync with mod.json
-project(ffmpeg-api VERSION 2.1.0)
+project(ffmpeg-api VERSION 3.0.0-beta.1)
 
 # This mod only supports Android: Windows users run the official ffmpeg.exe instead.
 if (NOT ANDROID)
