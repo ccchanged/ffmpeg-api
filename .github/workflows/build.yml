@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "v6-port"
+      - "**"
 
 jobs:
   build:
@@ -60,7 +60,7 @@ jobs:
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
-          sdk: v6.0.0-alpha.1
+          sdk: v6.0.0-beta.1
           bindings: geode-sdk/bindings
           bindings-ref: main
           combine: true
